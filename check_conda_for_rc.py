@@ -1,57 +1,44 @@
 #!/usr/bin/env python
 
 import argparse
-import requests
-import bs4
-import dateutil.parser
 import datetime
+import dateutil.parser
 import packaging.version
+import requests
 
-def parse_file_row(tr):
-    tds = tr.find_all('td')
-    string_date = tds[4]['title']
-    date = dateutil.parser.parse(string_date)
-    a = list(tds[3].find_all('a'))[1]
-    version = packaging.version.Version(a['href'].split('/')[3])
-    conda_tag = tds[6].a.string.strip()
-    return version, date, conda_tag
+def fetch_files(package):
+    url = f"https://api.anaconda.org/package/{package}/files"
+    resp = requests.get(url)
+    resp.raise_for_status()
+    return resp.json()
 
-def get_page(package, num):
-    req = requests.get(f"https://anaconda.org/{package}/files?page={num}")
-    soup = bs4.BeautifulSoup(req.content, features="lxml")
-    trs = soup.table.tbody.find_all('tr')
-    releases = set(parse_file_row(tr) for tr in trs)
-    return releases
+def parse_file_entry(entry):
+    version = packaging.version.Version(entry["version"])
+    uploaded_at = dateutil.parser.parse(entry["upload_time"])
+    labels = entry.get("labels") or []
+    return version, uploaded_at, labels
 
 def get_releases_since_days_ago(package, oldest_allowed):
-    num = 1
-    releases = set()
-    prev = None
-    new = None
-    while new is None or prev != new:
-        prev = new
-        new = get_page(package, num)
-        releases.update(new)
-        oldest = min(new, key=lambda r: r[1])  # sort by date
-        if oldest[1] < oldest_allowed:
-            break
-        num += 1
-
+    releases = []
+    for entry in fetch_files(package):
+        version, uploaded_at, labels = parse_file_entry(entry)
+        if uploaded_at >= oldest_allowed:
+            releases.append((version, uploaded_at, labels))
     return releases
 
-def find_rcs(releases, oldest_allowed, tags):
-    filtered = [r for r in releases if r[1] >= oldest_allowed]
-    if tags is not None:
-        filtered = [r for r in filtered if r[2] in tags]
+def find_rcs(releases, tags):
+    filtered = releases
+    if tags:
+        filtered = [r for r in filtered if any(label in tags for label in r[2])]
 
     versions = set(r[0] for r in filtered)
     rcs = [v for v in versions if v.pre and 'rc' in v.pre]
     return rcs
 
 def main(package, n_days=7, allowed_tags=None):
-    oldest_allowed = datetime.datetime.now() - datetime.timedelta(days=n_days)
+    oldest_allowed = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=n_days)
     releases = get_releases_since_days_ago(package, oldest_allowed)
-    rcs = find_rcs(releases, oldest_allowed, allowed_tags)
+    rcs = find_rcs(releases, allowed_tags)
     #print(rcs)
     return bool(rcs)
 
